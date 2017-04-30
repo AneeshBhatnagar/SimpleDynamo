@@ -8,25 +8,25 @@ import org.json.JSONObject;
  */
 
 public class MessageRequest {
-    private static String[] jsonFields = {"type", "originalPort", "response"};
+    private static String[] jsonFields = {"type", "originalPort", "message"};
     private String type;
     private String originalPort;
-    private String response;
+    private String message;
 
     public MessageRequest() {
-        this.type = this.originalPort = this.response = null;
+        this.type = this.originalPort = this.message = null;
     }
 
-    public MessageRequest(String type, String originalPort, String response) {
+    public MessageRequest(String type, String originalPort, String message) {
         this.type = type;
         this.originalPort = originalPort;
-        this.response = response;
+        this.message = message;
     }
 
     public MessageRequest(String type, String originalPort) {
         this.type = type;
         this.originalPort = originalPort;
-        this.response = "";
+        this.message = "";
     }
 
     public MessageRequest(String json) {
@@ -34,7 +34,7 @@ public class MessageRequest {
             JSONObject jsonObject = new JSONObject(json);
             this.type = jsonObject.getString(jsonFields[0]);
             this.originalPort = jsonObject.getString(jsonFields[1]);
-            this.response = jsonObject.getString(jsonFields[2]);
+            this.message = jsonObject.getString(jsonFields[2]);
         } catch (JSONException e) {
             e.printStackTrace();
         }
@@ -48,12 +48,12 @@ public class MessageRequest {
         this.type = type;
     }
 
-    public String getResponse() {
-        return response;
+    public String getMessage() {
+        return message;
     }
 
-    public void setResponse(String response) {
-        this.response = response;
+    public void setMessage(String message) {
+        this.message = message;
     }
 
     public String getOriginalPort() {
@@ -65,7 +65,7 @@ public class MessageRequest {
         try {
             jsonObject.put(jsonFields[0], type);
             jsonObject.put(jsonFields[1], originalPort);
-            jsonObject.put(jsonFields[2], response);
+            jsonObject.put(jsonFields[2], message);
         } catch (JSONException e) {
             e.printStackTrace();
             return null;

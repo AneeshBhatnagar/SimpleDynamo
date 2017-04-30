@@ -4,6 +4,8 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
@@ -24,6 +26,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashMap;
+import java.util.concurrent.ExecutionException;
+
+import static edu.buffalo.cse.cse486586.simpledynamo.DatabaseHelper.COLUMN_KEY;
+import static edu.buffalo.cse.cse486586.simpledynamo.DatabaseHelper.COLUMN_VALUE;
+import static edu.buffalo.cse.cse486586.simpledynamo.DatabaseHelper.TABLE_NAME;
 
 public class SimpleDynamoProvider extends ContentProvider {
     private final int SERVER_PORT = 10000;
@@ -37,9 +44,9 @@ public class SimpleDynamoProvider extends ContentProvider {
     private String successorHash;
     private Context context;
     private DatabaseHelper databaseHelper;
+    private SQLiteDatabase sqLiteDatabase;
     private Uri uri;
     private ServerSocket socket;
-
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -55,7 +62,25 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     @Override
     public Uri insert(Uri uri, ContentValues values) {
-        // TODO Auto-generated method stub
+        String key = values.getAsString("key"), value = values.getAsString("value");
+        String hashedKey = null;
+        try {
+            hashedKey = genHash(key);
+        } catch (NoSuchAlgorithmException e) {
+            e.printStackTrace();
+        }
+        int port = getInsertCoordinator(hashedKey);
+        MessageRequest request = new MessageRequest("Insert", Integer.toString(myPort), key + "," + value);
+        try {
+            String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
+            if (resp.equals("Success")) {
+                return uri;
+            }
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        }
         return null;
     }
 
@@ -124,7 +149,29 @@ public class SimpleDynamoProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
-        // TODO Auto-generated method stub
+        sqLiteDatabase = databaseHelper.getReadableDatabase();
+        String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
+        String searchClause = COLUMN_KEY + " = ?";
+        String[] searchQuery = {selection};
+        String hashedKey = "";
+
+        if(selection.equals("@")){
+            Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
+            cursor.moveToFirst();
+
+            MatrixCursor matrixCursor = new MatrixCursor(colsFetch);
+
+            while (!cursor.isAfterLast()) {
+                Object[] values = {cursor.getString(0), cursor.getString(1)};
+                matrixCursor.addRow(values);
+                cursor.moveToNext();
+            }
+            cursor.close();
+            sqLiteDatabase.close();
+
+            return matrixCursor;
+        }
+
         return null;
     }
 
@@ -175,6 +222,44 @@ public class SimpleDynamoProvider extends ContentProvider {
         return nodeMap.get(nodes[i]);
     }
 
+    private String insertLocally(MessageRequest request) {
+        sqLiteDatabase = databaseHelper.getWritableDatabase();
+        String msg = request.getMessage();
+        String split[] = msg.split(",");
+        ContentValues values = new ContentValues();
+        values.put("key", split[0]);
+        values.put("value", split[1]);
+        sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+        sqLiteDatabase.close();
+        if (!request.getType().equals("Replica2")) {
+            try {
+                if (request.getType().equals("Insert")) {
+                    request.setType("Replica1");
+                } else {
+                    request.setType("Replica2");
+                }
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                        successorPort*2);
+                DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                dataOutputStream.writeUTF(request.getJson());
+                dataOutputStream.flush();
+                DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                socket.setSoTimeout(5000);
+                String resp = dataInputStream.readUTF();
+                return resp;
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        return "Failure";
+    }
+
+    private String queryLocally() {
+
+        return null;
+    }
+
     private class ClientTask extends AsyncTask<Object, Void, String> {
         @Override
         protected String doInBackground(Object... msg) {
@@ -191,12 +276,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                 DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
                 socket.setSoTimeout(5000);
                 String resp = dataInputStream.readUTF();
-                if (resp.equals("OK")) {
-                    socket.close();
-                } else {
-                    socket.close();
-                    return resp;
-                }
+                Log.d("RespRecd",resp);
+                socket.close();
+                return resp;
             } catch (SocketTimeoutException e) {
                 Log.d("SocketTimeOut", "Exception for" + Integer.toString(remotePort));
             } catch (UnknownHostException e) {
@@ -204,7 +286,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             } catch (IOException e) {
                 Log.d("IOEXCEPTION", "Timeout on " + Integer.toString(remotePort));
                 e.printStackTrace();
-                return null;
+                return "NodeFailure";
             }
 
             return null;
@@ -225,7 +307,14 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataInputStream dataInputStream = new DataInputStream(socket.getInputStream());
                     DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
                     String jsonString = dataInputStream.readUTF();
-                    //Request request = new Request(jsonString);
+                    Log.d("ServerRecd", jsonString);
+                    MessageRequest request = new MessageRequest(jsonString);
+                    if ((request.getType().equals("Insert")) || (request.getType().equals("Replica1"))
+                            || (request.getType().equals("Replica2"))) {
+                        String resp = insertLocally(request);
+                        dataOutputStream.writeUTF(resp);
+                        socket.close();
+                    }
                 } catch (IOException e) {
                     e.printStackTrace();
                     break;

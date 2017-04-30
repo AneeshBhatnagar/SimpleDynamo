@@ -6,8 +6,22 @@
     android:paddingLeft="@dimen/activity_horizontal_margin"
     android:paddingRight="@dimen/activity_horizontal_margin"
     android:paddingTop="@dimen/activity_vertical_margin"
-    tools:context=".SimpleDynamoActivity" >
+    tools:context=".SimpleDynamoActivity">
 
+    <Button
+        android:id="@+id/button_test"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:text="PTest" />
+
+    <Button
+        android:id="@+id/button_ldump"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:layout_toRightOf="@id/button_test"
+        android:text="LDump" />
 
     <TextView
         android:id="@+id/textView1"
@@ -15,9 +29,10 @@
         android:layout_height="wrap_content"
         android:layout_alignParentLeft="true"
         android:layout_alignParentRight="true"
+        android:layout_below="@id/button_test"
         android:fadeScrollbars="true"
         android:gravity="bottom"
         android:maxLines="13"
-        android:textIsSelectable="true"
-        android:scrollbars="vertical" />
+        android:scrollbars="vertical"
+        android:textIsSelectable="true" />
 </RelativeLayout><!-- From: file:/home/aneesh/Documents/git/CSE586/SimpleDynamo/app/src/main/res/layout/activity_simple_dynamo.xml -->
