@@ -5,18 +5,28 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashMap;
-import java.util.TreeMap;
 
 public class SimpleDynamoProvider extends ContentProvider {
+    private final int SERVER_PORT = 10000;
     private HashMap<String, Integer> nodeMap;
     private ArrayList<String> nodeList;
     private int myPort;
@@ -28,6 +38,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     private Context context;
     private DatabaseHelper databaseHelper;
     private Uri uri;
+    private ServerSocket socket;
 
 
     @Override
@@ -97,6 +108,16 @@ public class SimpleDynamoProvider extends ContentProvider {
         Log.d("Predecessor", Integer.toString(predecessorPort));
         Log.d("OwnPort", Integer.toString(myPort));
         Log.d("Successor", Integer.toString(successorPort));
+
+        try {
+            socket = new ServerSocket(SERVER_PORT);
+        } catch (SocketException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, socket);
+
         return false;
     }
 
@@ -131,10 +152,10 @@ public class SimpleDynamoProvider extends ContentProvider {
             if (hash.compareTo(nodes[i]) >= 0 && hash.compareTo(nodes[i + 1]) <= 0)
                 break;
         }
-        if (i==4){
+        if (i == 4) {
             i = -1;
         }
-        return nodeMap.get(nodes[i+1]);
+        return nodeMap.get(nodes[i + 1]);
     }
 
     private int getQueryCoordinator(String hash) {
@@ -144,13 +165,81 @@ public class SimpleDynamoProvider extends ContentProvider {
             if (hash.compareTo(nodes[i]) >= 0 && hash.compareTo(nodes[i + 1]) <= 0)
                 break;
         }
-        if (i==4){
+        if (i == 4) {
             i = -1;
         }
-        i+=3;
-        if(i>=5){
-            i-=5;
+        i += 3;
+        if (i >= 5) {
+            i -= 5;
         }
         return nodeMap.get(nodes[i]);
+    }
+
+    private class ClientTask extends AsyncTask<Object, Void, String> {
+        @Override
+        protected String doInBackground(Object... msg) {
+            MessageRequest request = (MessageRequest) msg[0];
+            int remotePort = (Integer) msg[1];
+            try {
+                Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                        remotePort);
+                DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                dataOutputStream.writeUTF(request.getJson());
+                dataOutputStream.flush();
+                //Log.d("MSG SENT", request.getJson());
+                //Log.d("REMOTE PORT", Integer.toString(remotePort));
+                DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                socket.setSoTimeout(5000);
+                String resp = dataInputStream.readUTF();
+                if (resp.equals("OK")) {
+                    socket.close();
+                } else {
+                    socket.close();
+                    return resp;
+                }
+            } catch (SocketTimeoutException e) {
+                Log.d("SocketTimeOut", "Exception for" + Integer.toString(remotePort));
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                Log.d("IOEXCEPTION", "Timeout on " + Integer.toString(remotePort));
+                e.printStackTrace();
+                return null;
+            }
+
+            return null;
+        }
+    }
+
+    private class ServerTask extends AsyncTask<ServerSocket, MessageRequest, Void> {
+
+        ServerSocket serverSocket;
+
+        @Override
+        protected Void doInBackground(ServerSocket... sockets) {
+            serverSocket = sockets[0];
+            Log.d("ServerTask", "Server Task Started");
+            while (true) {
+                try {
+                    Socket socket = serverSocket.accept();
+                    DataInputStream dataInputStream = new DataInputStream(socket.getInputStream());
+                    DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                    String jsonString = dataInputStream.readUTF();
+                    //Request request = new Request(jsonString);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    break;
+                }
+            }
+
+            return null;
+        }
+
+        protected void onProgressUpdate(MessageRequest... requests) {
+            MessageRequest request = requests[0];
+
+            return;
+        }
+
     }
 }
