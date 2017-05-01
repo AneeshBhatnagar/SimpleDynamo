@@ -39,6 +39,15 @@ public class SimpleDynamoActivity extends Activity {
                 displayCursorOnTextView(resultCursor);
             }
         });
+
+        findViewById(R.id.button_gdump).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Cursor resultCursor = contentResolver.query(uri, null,
+                        "*", null, null);
+                displayCursorOnTextView(resultCursor);
+            }
+        });
 	}
 
     public void displayCursorOnTextView(Cursor cursor) {

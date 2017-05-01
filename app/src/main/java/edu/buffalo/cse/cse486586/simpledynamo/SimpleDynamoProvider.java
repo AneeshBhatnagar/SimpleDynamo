@@ -11,6 +11,10 @@ import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -151,15 +155,12 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String[] selectionArgs, String sortOrder) {
         sqLiteDatabase = databaseHelper.getReadableDatabase();
         String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
-        String searchClause = COLUMN_KEY + " = ?";
-        String[] searchQuery = {selection};
-        String hashedKey = "";
+        String hashedKey;
+        MatrixCursor matrixCursor = new MatrixCursor(colsFetch);
 
-        if(selection.equals("@")){
+        if (selection.equals("@")) {
             Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
             cursor.moveToFirst();
-
-            MatrixCursor matrixCursor = new MatrixCursor(colsFetch);
 
             while (!cursor.isAfterLast()) {
                 Object[] values = {cursor.getString(0), cursor.getString(1)};
@@ -170,8 +171,53 @@ public class SimpleDynamoProvider extends ContentProvider {
             sqLiteDatabase.close();
 
             return matrixCursor;
+        } else if (selection.equals("*")) {
+            try {
+                MessageRequest request = new MessageRequest("Query", Integer.toString(myPort), "*");
+                String response = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+                JSONObject jsonObject = new JSONObject(response);
+                JSONArray keysArray = jsonObject.getJSONArray("keys");
+                JSONArray valuesArray = jsonObject.getJSONArray("values");
+                for (int i = 0; i < keysArray.length(); i++) {
+                    Object[] values = {keysArray.getString(i), valuesArray.getString(i)};
+                    matrixCursor.addRow(values);
+                }
+                Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
+                cursor.moveToFirst();
+                while (!cursor.isAfterLast()) {
+                    Object[] values = {cursor.getString(0), cursor.getString(1)};
+                    matrixCursor.addRow(values);
+                    cursor.moveToNext();
+                }
+                cursor.close();
+                sqLiteDatabase.close();
+                return matrixCursor;
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+        } else {
+            try {
+                hashedKey = genHash(selection);
+                int port = getQueryCoordinator(hashedKey);
+                MessageRequest request = new MessageRequest("Query", Integer.toString(myPort), selection);
+                String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
+                Object[] values = {selection, resp};
+                matrixCursor.addRow(values);
+                sqLiteDatabase.close();
+                return matrixCursor;
+            } catch (NoSuchAlgorithmException e) {
+                e.printStackTrace();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+            }
         }
-
+        sqLiteDatabase.close();
         return null;
     }
 
@@ -239,7 +285,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                     request.setType("Replica2");
                 }
                 Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-                        successorPort*2);
+                        successorPort * 2);
                 DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
                 dataOutputStream.writeUTF(request.getJson());
                 dataOutputStream.flush();
@@ -255,9 +301,77 @@ public class SimpleDynamoProvider extends ContentProvider {
         return "Failure";
     }
 
-    private String queryLocally() {
+    private String queryLocally(String key, String originalPort) {
+        sqLiteDatabase = databaseHelper.getReadableDatabase();
+        if (originalPort == null) {
+            String searchClause = COLUMN_KEY + " = ?";
+            String[] searchQuery = {key};
+            String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
+            Cursor cursor = sqLiteDatabase.query(TABLE_NAME, colsFetch, searchClause, searchQuery, null, null, null);
+            cursor.moveToFirst();
+            String resp = cursor.getString(1);
+            cursor.close();
+            sqLiteDatabase.close();
+            return resp;
+        } else {
+            //* Query received.
+            String resp = null;
+            if (Integer.parseInt(originalPort) != successorPort) {
+                MessageRequest request = new MessageRequest("Query", originalPort, "*");
+                try {
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                            successorPort * 2);
+                    DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                    dataOutputStream.writeUTF(request.getJson());
+                    dataOutputStream.flush();
+                    DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                    socket.setSoTimeout(5000);
+                    resp = dataInputStream.readUTF();
+                    socket.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
 
-        return null;
+            Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
+            cursor.moveToFirst();
+
+            JSONArray keysArray = new JSONArray();
+            JSONArray valuesArray = new JSONArray();
+            int i = 0;
+            if (resp != null) {
+                try {
+                    JSONObject jsonObject = new JSONObject(resp);
+                    keysArray = jsonObject.getJSONArray("keys");
+                    valuesArray = jsonObject.getJSONArray("values");
+                    i = keysArray.length();
+                } catch (JSONException e) {
+                    e.printStackTrace();
+
+                }
+            }
+
+            while(!cursor.isAfterLast()){
+                try{
+                    keysArray.put(i,cursor.getString(0));
+                    valuesArray.put(i,cursor.getString(1));
+                    i++;
+                    cursor.moveToNext();
+                }catch(JSONException e){
+                    e.printStackTrace();
+                }
+
+            }
+            JSONObject response = new JSONObject();
+            try{
+                response.put("keys",keysArray);
+                response.put("values",valuesArray);
+            }catch (JSONException e){
+                e.printStackTrace();
+            }
+            sqLiteDatabase.close();
+            return response.toString();
+        }
     }
 
     private class ClientTask extends AsyncTask<Object, Void, String> {
@@ -276,7 +390,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
                 socket.setSoTimeout(5000);
                 String resp = dataInputStream.readUTF();
-                Log.d("RespRecd",resp);
+                Log.d("RespRecd", resp);
                 socket.close();
                 return resp;
             } catch (SocketTimeoutException e) {
@@ -313,6 +427,13 @@ public class SimpleDynamoProvider extends ContentProvider {
                             || (request.getType().equals("Replica2"))) {
                         String resp = insertLocally(request);
                         dataOutputStream.writeUTF(resp);
+                        socket.close();
+                    } else if (request.getType().equals("Query")) {
+                        if (request.getMessage().equals("*")) {
+                            dataOutputStream.writeUTF(queryLocally("*", request.getOriginalPort()));
+                        } else {
+                            dataOutputStream.writeUTF(queryLocally(request.getMessage(), null));
+                        }
                         socket.close();
                     }
                 } catch (IOException e) {
