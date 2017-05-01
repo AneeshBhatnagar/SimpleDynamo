@@ -54,7 +54,43 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
-        // TODO Auto-generated method stub
+        sqLiteDatabase = databaseHelper.getWritableDatabase();
+        String hashedKey = "";
+        if (selection.equals("@")) {
+            sqLiteDatabase.delete(TABLE_NAME, null, null);
+        } else if (selection.equals("*")) {
+            sqLiteDatabase.delete(TABLE_NAME, null, null);
+            MessageRequest request = new MessageRequest("Delete", Integer.toString(myPort), selection);
+            try {
+                new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+            }
+        } else {
+            try {
+                hashedKey = genHash(selection);
+            } catch (NoSuchAlgorithmException e) {
+                e.printStackTrace();
+            }
+
+            int port = getInsertCoordinator(hashedKey);
+            MessageRequest request = new MessageRequest("Delete", Integer.toString(myPort), selection);
+            try {
+                String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
+                if (resp.equals("Success")) {
+                    sqLiteDatabase.close();
+                    return 1;
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+            }
+        }
+        sqLiteDatabase.close();
         return 0;
     }
 
@@ -78,6 +114,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         try {
             String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
             if (resp.equals("Success")) {
+                sqLiteDatabase.close();
                 return uri;
             }
         } catch (InterruptedException e) {
@@ -297,8 +334,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 e.printStackTrace();
             }
         }
-
-        return "Failure";
+        return "Success";
     }
 
     private String queryLocally(String key, String originalPort) {
@@ -351,27 +387,75 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
             }
 
-            while(!cursor.isAfterLast()){
-                try{
-                    keysArray.put(i,cursor.getString(0));
-                    valuesArray.put(i,cursor.getString(1));
+            while (!cursor.isAfterLast()) {
+                try {
+                    keysArray.put(i, cursor.getString(0));
+                    valuesArray.put(i, cursor.getString(1));
                     i++;
                     cursor.moveToNext();
-                }catch(JSONException e){
+                } catch (JSONException e) {
                     e.printStackTrace();
                 }
 
             }
             JSONObject response = new JSONObject();
-            try{
-                response.put("keys",keysArray);
-                response.put("values",valuesArray);
-            }catch (JSONException e){
+            try {
+                response.put("keys", keysArray);
+                response.put("values", valuesArray);
+            } catch (JSONException e) {
                 e.printStackTrace();
             }
             sqLiteDatabase.close();
             return response.toString();
         }
+    }
+
+    private int deleteLocally(MessageRequest request) {
+        sqLiteDatabase = databaseHelper.getWritableDatabase();
+        if (!request.getMessage().equals("*")) {
+            String[] whereArgs = {request.getMessage()};
+            sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+            if (!request.getType().equals("Delete2")) {
+                try {
+                    if (request.getType().equals("Delete")) {
+                        request.setType("Delete1");
+                    } else {
+                        request.setType("Delete2");
+                    }
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                            successorPort * 2);
+                    DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                    dataOutputStream.writeUTF(request.getJson());
+                    dataOutputStream.flush();
+                    DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                    socket.setSoTimeout(5000);
+                    String resp = dataInputStream.readUTF();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        } else {
+            if (!request.getOriginalPort().equals(Integer.toString(successorPort))) {
+
+                try {
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                            successorPort * 2);
+                    DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                    dataOutputStream.writeUTF(request.getJson());
+                    dataOutputStream.flush();
+                    DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                    socket.setSoTimeout(5000);
+                    String resp = dataInputStream.readUTF();
+                    socket.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            sqLiteDatabase.delete(TABLE_NAME, null, null);
+        }
+
+        sqLiteDatabase.close();
+        return 0;
     }
 
     private class ClientTask extends AsyncTask<Object, Void, String> {
@@ -390,7 +474,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
                 socket.setSoTimeout(5000);
                 String resp = dataInputStream.readUTF();
-                Log.d("RespRecd", resp);
                 socket.close();
                 return resp;
             } catch (SocketTimeoutException e) {
@@ -435,6 +518,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                             dataOutputStream.writeUTF(queryLocally(request.getMessage(), null));
                         }
                         socket.close();
+                    } else if ((request.getType().equals("Delete")) || (request.getType().equals("Delete1"))
+                            || (request.getType().equals("Delete2"))) {
+                        dataOutputStream.writeUTF(Integer.toString(deleteLocally(request)));
+
                     }
                 } catch (IOException e) {
                     e.printStackTrace();
