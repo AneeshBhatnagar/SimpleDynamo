@@ -54,7 +54,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
-        sqLiteDatabase = databaseHelper.getWritableDatabase();
         String hashedKey = "";
         if (selection.equals("@")) {
             sqLiteDatabase.delete(TABLE_NAME, null, null);
@@ -81,7 +80,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             try {
                 String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
                 if (resp.equals("Success")) {
-                    sqLiteDatabase.close();
                     return 1;
                 }
             } catch (InterruptedException e) {
@@ -90,7 +88,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 e.printStackTrace();
             }
         }
-        sqLiteDatabase.close();
         return 0;
     }
 
@@ -114,7 +111,6 @@ public class SimpleDynamoProvider extends ContentProvider {
         try {
             String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
             if (resp.equals("Success")) {
-                sqLiteDatabase.close();
                 return uri;
             }
         } catch (InterruptedException e) {
@@ -129,6 +125,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     public boolean onCreate() {
         context = getContext();
         databaseHelper = new DatabaseHelper(context);
+        sqLiteDatabase = databaseHelper.getWritableDatabase();
         Uri.Builder builder = new Uri.Builder();
         builder.authority("edu.buffalo.cse.cse486586.simpledynamo.provider");
         builder.scheme("content");
@@ -190,7 +187,6 @@ public class SimpleDynamoProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
-        sqLiteDatabase = databaseHelper.getReadableDatabase();
         String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
         String hashedKey;
         MatrixCursor matrixCursor = new MatrixCursor(colsFetch);
@@ -205,7 +201,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 cursor.moveToNext();
             }
             cursor.close();
-            sqLiteDatabase.close();
 
             return matrixCursor;
         } else if (selection.equals("*")) {
@@ -227,7 +222,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                     cursor.moveToNext();
                 }
                 cursor.close();
-                sqLiteDatabase.close();
                 return matrixCursor;
             } catch (InterruptedException e) {
                 e.printStackTrace();
@@ -244,7 +238,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
                 Object[] values = {selection, resp};
                 matrixCursor.addRow(values);
-                sqLiteDatabase.close();
                 return matrixCursor;
             } catch (NoSuchAlgorithmException e) {
                 e.printStackTrace();
@@ -254,7 +247,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 e.printStackTrace();
             }
         }
-        sqLiteDatabase.close();
         return null;
     }
 
@@ -305,15 +297,13 @@ public class SimpleDynamoProvider extends ContentProvider {
         return nodeMap.get(nodes[i]);
     }
 
-    private String insertLocally(MessageRequest request) {
-        sqLiteDatabase = databaseHelper.getWritableDatabase();
+    private synchronized String insertLocally(MessageRequest request) {
         String msg = request.getMessage();
         String split[] = msg.split(",");
         ContentValues values = new ContentValues();
         values.put("key", split[0]);
         values.put("value", split[1]);
         sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
-        sqLiteDatabase.close();
         if (!request.getType().equals("Replica2")) {
             try {
                 if (request.getType().equals("Insert")) {
@@ -337,8 +327,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return "Success";
     }
 
-    private String queryLocally(String key, String originalPort) {
-        sqLiteDatabase = databaseHelper.getReadableDatabase();
+    private synchronized String queryLocally(String key, String originalPort) {
         if (originalPort == null) {
             String searchClause = COLUMN_KEY + " = ?";
             String[] searchQuery = {key};
@@ -347,7 +336,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             cursor.moveToFirst();
             String resp = cursor.getString(1);
             cursor.close();
-            sqLiteDatabase.close();
             return resp;
         } else {
             //* Query received.
@@ -405,13 +393,11 @@ public class SimpleDynamoProvider extends ContentProvider {
             } catch (JSONException e) {
                 e.printStackTrace();
             }
-            sqLiteDatabase.close();
             return response.toString();
         }
     }
 
-    private int deleteLocally(MessageRequest request) {
-        sqLiteDatabase = databaseHelper.getWritableDatabase();
+    private synchronized int deleteLocally(MessageRequest request) {
         if (!request.getMessage().equals("*")) {
             String[] whereArgs = {request.getMessage()};
             sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
@@ -454,7 +440,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             sqLiteDatabase.delete(TABLE_NAME, null, null);
         }
 
-        sqLiteDatabase.close();
         return 0;
     }
 
