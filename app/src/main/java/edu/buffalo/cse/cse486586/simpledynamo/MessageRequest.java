@@ -72,4 +72,8 @@ public class MessageRequest {
         }
         return jsonObject.toString();
     }
+
+    public void setOriginalPort(String originalPort) {
+        this.originalPort = originalPort;
+    }
 }

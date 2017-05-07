@@ -40,6 +40,9 @@ public class SimpleDynamoProvider extends ContentProvider {
     private final int SERVER_PORT = 10000;
     private HashMap<String, Integer> nodeMap;
     private ArrayList<String> nodeList;
+    private ArrayList<Integer> orderedNodes;
+    private HashMap<String, ArrayList<String>> insertLog;
+    private HashMap<String, ArrayList<String>> deleteLog;
     private int myPort;
     private int predecessorPort;
     private int successorPort;
@@ -61,7 +64,10 @@ public class SimpleDynamoProvider extends ContentProvider {
             sqLiteDatabase.delete(TABLE_NAME, null, null);
             MessageRequest request = new MessageRequest("Delete", Integer.toString(myPort), selection);
             try {
-                new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+                String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+                if (resp.equals("Failure")) {
+                    new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, getNextNode(successorPort) * 2).get();
+                }
 
             } catch (InterruptedException e) {
                 e.printStackTrace();
@@ -80,6 +86,11 @@ public class SimpleDynamoProvider extends ContentProvider {
             try {
                 String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
                 if (resp.equals("Success")) {
+                    return 1;
+                } else if (resp.equals("Failure")) {
+                    request.setType("Delete1");
+                    request.setOriginalPort(Integer.toString(port));
+                    new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, getNextNode(port) * 2).get();
                     return 1;
                 }
             } catch (InterruptedException e) {
@@ -112,6 +123,14 @@ public class SimpleDynamoProvider extends ContentProvider {
             String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
             if (resp.equals("Success")) {
                 return uri;
+            } else if (resp.equals("Failure")) {
+                request.setOriginalPort(Integer.toString(port));
+                request.setType("Replica1");
+                port = getNextNode(port);
+                String resp2 = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
+                if (resp2.equals("Success")) {
+                    return uri;
+                }
             }
         } catch (InterruptedException e) {
             e.printStackTrace();
@@ -135,6 +154,9 @@ public class SimpleDynamoProvider extends ContentProvider {
         myPort = Integer.parseInt(portStr);
         nodeMap = new HashMap<String, Integer>();
         nodeList = new ArrayList<String>();
+        orderedNodes = new ArrayList<Integer>();
+        insertLog = new HashMap<String, ArrayList<String>>();
+        deleteLog = new HashMap<String, ArrayList<String>>();
 
         try {
             myHash = genHash(Integer.toString(myPort));
@@ -154,6 +176,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             i += 2;
         }
         Collections.sort(nodeList);
+        for (i = 0; i < nodeList.size(); i++) {
+            orderedNodes.add(i, nodeMap.get(nodeList.get(i)));
+        }
         int index = nodeList.indexOf(myHash);
         if (index == 0) {
             successorHash = nodeList.get(1);
@@ -172,6 +197,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         Log.d("OwnPort", Integer.toString(myPort));
         Log.d("Successor", Integer.toString(successorPort));
 
+        initiateRecoverySequence();
+
         try {
             socket = new ServerSocket(SERVER_PORT);
         } catch (SocketException e) {
@@ -180,7 +207,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             e.printStackTrace();
         }
         new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, socket);
-
         return false;
     }
 
@@ -207,6 +233,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             try {
                 MessageRequest request = new MessageRequest("Query", Integer.toString(myPort), "*");
                 String response = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+                if (response.equals("Failure")) {
+                    response = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, getNextNode(successorPort) * 2).get();
+                }
                 JSONObject jsonObject = new JSONObject(response);
                 JSONArray keysArray = jsonObject.getJSONArray("keys");
                 JSONArray valuesArray = jsonObject.getJSONArray("values");
@@ -236,6 +265,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                 int port = getQueryCoordinator(hashedKey);
                 MessageRequest request = new MessageRequest("Query", Integer.toString(myPort), selection);
                 String resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, port * 2).get();
+                if (resp.equals("Failure")) {
+                    resp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, getPreviousNode(port) * 2).get();
+                }
                 Object[] values = {selection, resp};
                 matrixCursor.addRow(values);
                 return matrixCursor;
@@ -297,6 +329,26 @@ public class SimpleDynamoProvider extends ContentProvider {
         return nodeMap.get(nodes[i]);
     }
 
+    private int getNextNode(int search) {
+        int i = orderedNodes.indexOf(search);
+        if (i == orderedNodes.size() - 1) {
+            i = -1;
+        }
+        return orderedNodes.get(i + 1);
+    }
+
+    private int getPreviousNode(int search) {
+        int i = orderedNodes.indexOf(search);
+        if (i == 0) {
+            i = orderedNodes.size();
+        }
+        return orderedNodes.get(i - 1);
+    }
+
+    private void initiateRecoverySequence(){
+
+    }
+
     private synchronized String insertLocally(MessageRequest request) {
         String msg = request.getMessage();
         String split[] = msg.split(",");
@@ -304,9 +356,21 @@ public class SimpleDynamoProvider extends ContentProvider {
         values.put("key", split[0]);
         values.put("value", split[1]);
         sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+        String savePort = request.getOriginalPort();
+        if (request.getType().equals("Insert")) {
+            savePort = Integer.toString(myPort);
+        }
+        if (insertLog.containsKey(savePort)) {
+            insertLog.get(savePort).add(msg);
+        } else {
+            ArrayList<String> temp = new ArrayList<String>();
+            temp.add(msg);
+            insertLog.put(savePort, temp);
+        }
         if (!request.getType().equals("Replica2")) {
             try {
                 if (request.getType().equals("Insert")) {
+                    request.setOriginalPort(Integer.toString(myPort));
                     request.setType("Replica1");
                 } else {
                     request.setType("Replica2");
@@ -322,6 +386,23 @@ public class SimpleDynamoProvider extends ContentProvider {
                 return resp;
             } catch (IOException e) {
                 e.printStackTrace();
+                //Failed to send to Next Node
+                if (request.getType().equals("Replica1")) {
+                    request.setType("Replica2");
+                    try {
+                        Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                getNextNode(successorPort) * 2);
+                        DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                        dataOutputStream.writeUTF(request.getJson());
+                        dataOutputStream.flush();
+                        DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                        socket.setSoTimeout(5000);
+                        String resp = dataInputStream.readUTF();
+                        return resp;
+                    } catch (IOException f) {
+                        f.printStackTrace();
+                    }
+                }
             }
         }
         return "Success";
@@ -354,6 +435,22 @@ public class SimpleDynamoProvider extends ContentProvider {
                     socket.close();
                 } catch (IOException e) {
                     e.printStackTrace();
+                    int newPort = getNextNode(successorPort);
+                    if (Integer.parseInt(originalPort) != newPort) {
+                        try {
+                            Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                    newPort * 2);
+                            DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                            dataOutputStream.writeUTF(request.getJson());
+                            dataOutputStream.flush();
+                            DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                            socket.setSoTimeout(5000);
+                            resp = dataInputStream.readUTF();
+                            socket.close();
+                        } catch (IOException f) {
+                            f.printStackTrace();
+                        }
+                    }
                 }
             }
 
@@ -401,9 +498,21 @@ public class SimpleDynamoProvider extends ContentProvider {
         if (!request.getMessage().equals("*")) {
             String[] whereArgs = {request.getMessage()};
             sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+            String savePort = request.getOriginalPort();
+            if (request.getType().equals("Delete")) {
+                savePort = Integer.toString(myPort);
+            }
+            if (deleteLog.containsKey(savePort)) {
+                deleteLog.get(savePort).add(request.getMessage());
+            } else {
+                ArrayList<String> temp = new ArrayList<String>();
+                temp.add(request.getMessage());
+                deleteLog.put(savePort, temp);
+            }
             if (!request.getType().equals("Delete2")) {
                 try {
                     if (request.getType().equals("Delete")) {
+                        request.setOriginalPort(Integer.toString(myPort));
                         request.setType("Delete1");
                     } else {
                         request.setType("Delete2");
@@ -418,6 +527,21 @@ public class SimpleDynamoProvider extends ContentProvider {
                     String resp = dataInputStream.readUTF();
                 } catch (IOException e) {
                     e.printStackTrace();
+                    if (request.getType().equals("Delete1")) {
+                        request.setType("Delete2");
+                        try {
+                            Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                    getNextNode(successorPort) * 2);
+                            DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                            dataOutputStream.writeUTF(request.getJson());
+                            dataOutputStream.flush();
+                            DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                            socket.setSoTimeout(5000);
+                            String resp = dataInputStream.readUTF();
+                        } catch (IOException f) {
+                            f.printStackTrace();
+                        }
+                    }
                 }
             }
         } else {
@@ -435,6 +559,22 @@ public class SimpleDynamoProvider extends ContentProvider {
                     socket.close();
                 } catch (IOException e) {
                     e.printStackTrace();
+                    int newPort = getNextNode(successorPort);
+                    if (!request.getOriginalPort().equals(Integer.toString(successorPort))) {
+                        try {
+                            Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                    newPort * 2);
+                            DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+                            dataOutputStream.writeUTF(request.getJson());
+                            dataOutputStream.flush();
+                            DataInputStream dataInputStream = new DataInputStream((socket.getInputStream()));
+                            socket.setSoTimeout(5000);
+                            String resp = dataInputStream.readUTF();
+                            socket.close();
+                        } catch (IOException f) {
+                            f.printStackTrace();
+                        }
+                    }
                 }
             }
             sqLiteDatabase.delete(TABLE_NAME, null, null);
@@ -468,10 +608,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             } catch (IOException e) {
                 Log.d("IOEXCEPTION", "Timeout on " + Integer.toString(remotePort));
                 e.printStackTrace();
-                return "NodeFailure";
             }
 
-            return null;
+            return "Failure";
         }
     }
 
