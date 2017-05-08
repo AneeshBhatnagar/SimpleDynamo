@@ -345,7 +345,93 @@ public class SimpleDynamoProvider extends ContentProvider {
         return orderedNodes.get(i - 1);
     }
 
-    private void initiateRecoverySequence(){
+    private void initiateRecoverySequence() {
+        String message = Integer.toString(myPort) + "," + Integer.toString(predecessorPort) + "," + Integer.toString(getPreviousNode(predecessorPort));
+        MessageRequest request = new MessageRequest("Recovery", Integer.toString(myPort), message);
+
+        //Send to predecessor and successor
+        String predResp = null, succResp = null;
+        try {
+            predResp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, predecessorPort * 2).get();
+            succResp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        }
+        if (predResp.equals("Failure") || succResp.equals("Failure")) {
+            //Others have not started yet! So it must be the phase with no failure
+            return;
+        }
+        JSONObject jsonObject = null, jsonObject1 = null;
+        String predInsert = null, predDelete = null, succInsert = null, succDelete = null;
+        try {
+            jsonObject = new JSONObject(predResp);
+            jsonObject1 = new JSONObject(succResp);
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+
+        try {
+            predInsert = jsonObject.getString("Insert");
+            predDelete = jsonObject.getString("Delete");
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+
+        try {
+            succInsert = jsonObject1.getString("Insert");
+            succDelete = jsonObject1.getString("Delete");
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+
+        predInsert = predInsert.replaceAll("\\[","");
+        predInsert = predInsert.replaceAll("\\]",", ");
+        predDelete = predDelete.replaceAll("\\[","");
+        predDelete = predDelete.replaceAll("\\]",", ");
+        succInsert = succInsert.replaceAll("\\[","");
+        succInsert = succInsert.replaceAll("\\]",", ");
+        succDelete = succDelete.replaceAll("\\[","");
+        succDelete = succDelete.replaceAll("\\]",", ");
+        Log.d("PredInsert", predInsert);
+        Log.d("PredDelete", predDelete);
+        Log.d("SuccInsert", succInsert);
+        Log.d("SuccDelete", succDelete);
+
+        String[] predInsertArr = predInsert.split(", ");
+        String[] succInsertArr = succInsert.split(", ");
+        String[] predDeleteArr = predDelete.split(", ");
+        String[] succDeleteArr = succDelete.split(", ");
+        if(predInsert.length() != 0)
+            for(String j: predInsertArr){
+                String[] x = j.split(",");
+                ContentValues values = new ContentValues();
+                values.put("key", x[0]);
+                values.put("value", x[1]);
+                sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+            }
+        if(predDelete.length() != 0)
+            for(String j: predDeleteArr){
+                String[] whereArgs = {j};
+                sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+            }
+
+        if(succInsert.length() != 0)
+            for(String j: succInsertArr){
+                String[] x = j.split(",");
+                ContentValues values = new ContentValues();
+                values.put("key", x[0]);
+                values.put("value", x[1]);
+                sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+            }
+
+        if(succDelete.length() != 0)
+            for(String j: succDeleteArr){
+                String[] whereArgs = {j};
+                sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+            }
 
     }
 
@@ -645,7 +731,27 @@ public class SimpleDynamoProvider extends ContentProvider {
                     } else if ((request.getType().equals("Delete")) || (request.getType().equals("Delete1"))
                             || (request.getType().equals("Delete2"))) {
                         dataOutputStream.writeUTF(Integer.toString(deleteLocally(request)));
-
+                        socket.close();
+                    } else if (request.getType().equals("Recovery")){
+                        String[] fetchPorts = request.getMessage().split(",");
+                        String ins = "", del = "";
+                        for(String f : fetchPorts){
+                            if(insertLog.containsKey(f)){
+                                ins += insertLog.get(f).toString();
+                            }
+                            if(deleteLog.containsKey(f)){
+                                del += deleteLog.get(f).toString();
+                            }
+                        }
+                        JSONObject jsonObject = new JSONObject();
+                        try{
+                            jsonObject.put("Insert",ins);
+                            jsonObject.put("Delete",del);
+                        }catch (JSONException e){
+                            e.printStackTrace();
+                        }
+                        dataOutputStream.writeUTF(jsonObject.toString());
+                        socket.close();
                     }
                 } catch (IOException e) {
                     e.printStackTrace();
