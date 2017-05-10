@@ -3,6 +3,7 @@ package edu.buffalo.cse.cse486586.simpledynamo;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.database.sqlite.SQLiteDatabase;
@@ -31,6 +32,7 @@ import java.util.Collections;
 import java.util.Formatter;
 import java.util.HashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Semaphore;
 
 import static edu.buffalo.cse.cse486586.simpledynamo.DatabaseHelper.COLUMN_KEY;
 import static edu.buffalo.cse.cse486586.simpledynamo.DatabaseHelper.COLUMN_VALUE;
@@ -51,8 +53,8 @@ public class SimpleDynamoProvider extends ContentProvider {
     private Context context;
     private DatabaseHelper databaseHelper;
     private SQLiteDatabase sqLiteDatabase;
-    private Uri uri;
     private ServerSocket socket;
+    private Semaphore recoveryLock;
 
     @Override
     public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -155,10 +157,6 @@ public class SimpleDynamoProvider extends ContentProvider {
         context = getContext();
         databaseHelper = new DatabaseHelper(context);
         sqLiteDatabase = databaseHelper.getWritableDatabase();
-        Uri.Builder builder = new Uri.Builder();
-        builder.authority("edu.buffalo.cse.cse486586.simpledynamo.provider");
-        builder.scheme("content");
-        uri = builder.build();
         TelephonyManager tel = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
         String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
         myPort = Integer.parseInt(portStr);
@@ -166,6 +164,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         nodeList = new ArrayList<String>();
         orderedNodes = new ArrayList<Integer>();
         insertDeleteLog = new HashMap<String, ArrayList<String>>();
+        recoveryLock = new Semaphore(1, true);
+
         try {
             myHash = genHash(Integer.toString(myPort));
         } catch (NoSuchAlgorithmException e) {
@@ -205,9 +205,13 @@ public class SimpleDynamoProvider extends ContentProvider {
         Log.d("OwnPort", Integer.toString(myPort));
         Log.d("Successor", Integer.toString(successorPort));
 
-        synchronized (this) {
-            initiateRecoverySequence();
+        try {
+            recoveryLock.acquire();
+            new RecoveryTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
+
 
         try {
             socket = new ServerSocket(SERVER_PORT);
@@ -218,6 +222,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             e.printStackTrace();
         }
 
+        /*synchronized (this) {
+            initiateRecoverySequence();
+        }*/
 
         return false;
     }
@@ -228,6 +235,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
         String hashedKey;
         MatrixCursor matrixCursor = new MatrixCursor(colsFetch);
+        Log.d("ContentQUERY", selection);
 
         if (selection.equals("@")) {
             Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
@@ -240,6 +248,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
             cursor.close();
 
+            Log.d("ContentResp", selection + cursor.toString());
             return matrixCursor;
         } else if (selection.equals("*")) {
             try {
@@ -311,7 +320,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return 0;
     }
 
-    private String genHash(String input) throws NoSuchAlgorithmException {
+    private synchronized String genHash(String input) throws NoSuchAlgorithmException {
         MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
         byte[] sha1Hash = sha1.digest(input.getBytes());
         Formatter formatter = new Formatter();
@@ -321,7 +330,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return formatter.toString();
     }
 
-    private int getInsertCoordinator(String hash) {
+    private synchronized int getInsertCoordinator(String hash) {
         String[] nodes = nodeList.toArray(new String[5]);
         int i = 0;
         for (; i < 4; i++) {
@@ -334,7 +343,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return nodeMap.get(nodes[i + 1]);
     }
 
-    private int getQueryCoordinator(String hash) {
+    private synchronized int getQueryCoordinator(String hash) {
         String[] nodes = nodeList.toArray(new String[5]);
         int i = 0;
         for (; i < 4; i++) {
@@ -351,7 +360,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return nodeMap.get(nodes[i]);
     }
 
-    private int getNextNode(int search) {
+    private synchronized int getNextNode(int search) {
         int i = orderedNodes.indexOf(search);
         if (i == orderedNodes.size() - 1) {
             i = -1;
@@ -359,7 +368,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return orderedNodes.get(i + 1);
     }
 
-    private int getPreviousNode(int search) {
+    private synchronized int getPreviousNode(int search) {
         int i = orderedNodes.indexOf(search);
         if (i == 0) {
             i = orderedNodes.size();
@@ -387,7 +396,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return "Failure";
     }
 
-    private String sendMessage(MessageRequest request, int port, int timeout) {
+    private synchronized String sendMessage(MessageRequest request, int port, int timeout) {
         try {
             Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
                     port);
@@ -410,21 +419,29 @@ public class SimpleDynamoProvider extends ContentProvider {
     private synchronized boolean initiateRecoverySequence() {
 
         try {
-            Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
+            SharedPreferences preferences = context.getSharedPreferences("DynamoPref", Context.MODE_PRIVATE);
+            if (!preferences.contains("FirstRun")) {
+                SharedPreferences.Editor editor = preferences.edit();
+                editor.putInt("FirstRun", 0);
+                editor.commit();
+                Log.d("RecoverySeq", "No need");
+                return false;
+            }
+            /*Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
             if (cursor.getCount() == 0) {
                 Log.d("RecoverySeq", "No need for recovery!");
                 return false;
-            }
-            Log.d("RecoverySeq","Fetching from Others!");
+            }*/
+            Log.d("RecoverySeq", "Fetching from Others!");
             String message = Integer.toString(myPort) + "," + Integer.toString(predecessorPort) + "," + Integer.toString(getPreviousNode(predecessorPort));
             MessageRequest request = new MessageRequest("Recovery", Integer.toString(myPort), message);
             //Send to predecessor and successor
             String predResp = null, succResp = null;
-            predResp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, predecessorPort * 2).get();
-            succResp = new ClientTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, request, successorPort * 2).get();
+            predResp = new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, request, predecessorPort * 2).get();
+            succResp = new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, request, successorPort * 2).get();
             if (predResp.equals("Failure") || succResp.equals("Failure")) {
                 //Others have not started yet! So it must be the phase with no failure
-                Log.d("RecoveryRespFound","Failed!!!");
+                Log.d("RecoveryRespFound", "Failed!!!");
                 return false;
             }
             String predLog = predResp, succLog = succResp;
@@ -478,164 +495,271 @@ public class SimpleDynamoProvider extends ContentProvider {
     }
 
     private synchronized String insertLocally(MessageRequest request) {
-        String msg = request.getMessage();
-        String split[] = msg.split(",");
-        ContentValues values = new ContentValues();
-        values.put("key", split[0]);
-        values.put("value", split[1]);
-        sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
-        String savePort = request.getOriginalPort();
-        if (request.getType().equals("Insert")) {
-            savePort = Integer.toString(myPort);
-        }
-        if (insertDeleteLog.containsKey(savePort)) {
-            insertDeleteLog.get(savePort).add("Insert," + msg);
-        } else {
-            ArrayList<String> temp = new ArrayList<String>();
-            temp.add("Insert," + msg);
-            insertDeleteLog.put(savePort, temp);
-        }
-        if (!request.getType().equals("Replica2")) {
+        try {
+            recoveryLock.acquire();
+            String msg = request.getMessage();
+            String split[] = msg.split(",");
+            ContentValues values = new ContentValues();
+            values.put("key", split[0]);
+            values.put("value", split[1]);
+            sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+            String savePort = request.getOriginalPort();
             if (request.getType().equals("Insert")) {
-                request.setOriginalPort(Integer.toString(myPort));
-                request.setType("Replica1");
+                savePort = Integer.toString(myPort);
+            }
+            if (insertDeleteLog.containsKey(savePort)) {
+                insertDeleteLog.get(savePort).add("Insert," + msg);
             } else {
-                request.setType("Replica2");
+                ArrayList<String> temp = new ArrayList<String>();
+                temp.add("Insert," + msg);
+                insertDeleteLog.put(savePort, temp);
             }
-            String resp = sendMessage(request, successorPort * 2);
-            if (resp.equals("Failure")) {
-                if (request.getType().equals("Replica1")) {
+            if (!request.getType().equals("Replica2")) {
+                if (request.getType().equals("Insert")) {
+                    request.setOriginalPort(Integer.toString(myPort));
+                    request.setType("Replica1");
+                } else {
                     request.setType("Replica2");
-                    String resp2 = sendMessage(request, getNextNode(successorPort) * 2);
-                    return resp2;
                 }
+                String resp = sendMessage(request, successorPort * 2);
+                if (resp.equals("Failure")) {
+                    if (request.getType().equals("Replica1")) {
+                        request.setType("Replica2");
+                        String resp2 = sendMessage(request, getNextNode(successorPort) * 2);
+                        if (resp2.equals("Failure")) {
+                            request.setType("Replica1");
+                            resp = sendMessage(request, successorPort * 2);
+                            recoveryLock.release();
+                            return resp;
+                        }
+                        recoveryLock.release();
+                        return resp2;
+                    }
+                }
+                recoveryLock.release();
+                return resp;
             }
-            return resp;
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
+        recoveryLock.release();
         return "Success";
     }
 
     private synchronized String queryLocally(String key, String originalPort) {
-        if (originalPort == null) {
-            String searchClause = COLUMN_KEY + " = ?";
-            String[] searchQuery = {key};
-            String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
-            Cursor cursor = sqLiteDatabase.query(TABLE_NAME, colsFetch, searchClause, searchQuery, null, null, null);
-            cursor.moveToFirst();
-            String resp = "NOT FOUND";
-            if (cursor.getCount() > 0)
-                resp = cursor.getString(1);
-            else {
-                //Fetch from predecessor or predecessor2!!
-                MessageRequest request = new MessageRequest("Query", Integer.toString(myPort), key);
-                String x = sendMessage(request, predecessorPort * 2, 1500);
-                if (x.equals("Failure")) {
-                    x = sendMessage(request, getPreviousNode(predecessorPort) * 2, 1500);
+        try {
+            recoveryLock.acquire();
+            if (originalPort == null) {
+                String searchClause = COLUMN_KEY + " = ?";
+                String[] searchQuery = {key};
+                String[] colsFetch = {COLUMN_KEY, COLUMN_VALUE};
+                Cursor cursor = sqLiteDatabase.query(TABLE_NAME, colsFetch, searchClause, searchQuery, null, null, null);
+                cursor.moveToFirst();
+                String resp = "NOT FOUND";
+                if (cursor.getCount() > 0)
+                    resp = cursor.getString(1);
+                else {
+                    //Fetch from predecessor or predecessor2!!
+                    MessageRequest request = new MessageRequest("Query", Integer.toString(myPort), key);
+                    String x = sendMessage(request, predecessorPort * 2, 1500);
+                    if (x.equals("Failure")) {
+                        x = sendMessage(request, getPreviousNode(predecessorPort) * 2, 1500);
+                    }
+                    recoveryLock.release();
+                    return x;
                 }
-                return x;
-            }
-            cursor.close();
-            return resp;
-        } else {
-            //* Query received.
-            String resp = null;
-            if (Integer.parseInt(originalPort) != successorPort) {
-                MessageRequest request = new MessageRequest("Query", originalPort, "*");
-                resp = sendMessage(request, successorPort * 2);
-                if (resp.equals("Failure")) {
-                    int newPort = getNextNode(successorPort);
-                    if (Integer.parseInt(originalPort) != newPort) {
-                        resp = sendMessage(request, getNextNode(successorPort) * 2);
+                cursor.close();
+                recoveryLock.release();
+                return resp;
+            } else {
+                //* Query received.
+                String resp = null;
+                if (Integer.parseInt(originalPort) != successorPort) {
+                    MessageRequest request = new MessageRequest("Query", originalPort, "*");
+                    resp = sendMessage(request, successorPort * 2);
+                    if (resp.equals("Failure")) {
+                        int newPort = getNextNode(successorPort);
+                        if (Integer.parseInt(originalPort) != newPort) {
+                            resp = sendMessage(request, getNextNode(successorPort) * 2);
+                        }
+                    }
+
+                }
+
+                Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
+                cursor.moveToFirst();
+
+                JSONArray keysArray = new JSONArray();
+                JSONArray valuesArray = new JSONArray();
+                int i = 0;
+                if (resp != null) {
+                    try {
+                        JSONObject jsonObject = new JSONObject(resp);
+                        keysArray = jsonObject.getJSONArray("keys");
+                        valuesArray = jsonObject.getJSONArray("values");
+                        i = keysArray.length();
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+
                     }
                 }
 
-            }
-
-            Cursor cursor = sqLiteDatabase.rawQuery("Select * from " + TABLE_NAME, null);
-            cursor.moveToFirst();
-
-            JSONArray keysArray = new JSONArray();
-            JSONArray valuesArray = new JSONArray();
-            int i = 0;
-            if (resp != null) {
-                try {
-                    JSONObject jsonObject = new JSONObject(resp);
-                    keysArray = jsonObject.getJSONArray("keys");
-                    valuesArray = jsonObject.getJSONArray("values");
-                    i = keysArray.length();
-                } catch (JSONException e) {
-                    e.printStackTrace();
+                while (!cursor.isAfterLast()) {
+                    try {
+                        keysArray.put(i, cursor.getString(0));
+                        valuesArray.put(i, cursor.getString(1));
+                        i++;
+                        cursor.moveToNext();
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                    }
 
                 }
-            }
-
-            while (!cursor.isAfterLast()) {
+                JSONObject response = new JSONObject();
                 try {
-                    keysArray.put(i, cursor.getString(0));
-                    valuesArray.put(i, cursor.getString(1));
-                    i++;
-                    cursor.moveToNext();
+                    response.put("keys", keysArray);
+                    response.put("values", valuesArray);
                 } catch (JSONException e) {
                     e.printStackTrace();
                 }
-
+                recoveryLock.release();
+                return response.toString();
             }
-            JSONObject response = new JSONObject();
-            try {
-                response.put("keys", keysArray);
-                response.put("values", valuesArray);
-            } catch (JSONException e) {
-                e.printStackTrace();
-            }
-            return response.toString();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
+
+        return "";
     }
 
     private synchronized int deleteLocally(MessageRequest request) {
-        if (!request.getMessage().equals("*")) {
-            String[] whereArgs = {request.getMessage()};
-            sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
-            String savePort = request.getOriginalPort();
-            if (request.getType().equals("Delete")) {
-                savePort = Integer.toString(myPort);
-            }
-            if (insertDeleteLog.containsKey(savePort)) {
-                insertDeleteLog.get(savePort).add("Delete," + request.getMessage());
-            } else {
-                ArrayList<String> temp = new ArrayList<String>();
-                temp.add("Delete," + request.getMessage());
-                insertDeleteLog.put(savePort, temp);
-            }
-            if (!request.getType().equals("Delete2")) {
+        try {
+            recoveryLock.acquire();
+            if (!request.getMessage().equals("*")) {
+                String[] whereArgs = {request.getMessage()};
+                sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+                String savePort = request.getOriginalPort();
                 if (request.getType().equals("Delete")) {
-                    request.setOriginalPort(Integer.toString(myPort));
-                    request.setType("Delete1");
+                    savePort = Integer.toString(myPort);
+                }
+                if (insertDeleteLog.containsKey(savePort)) {
+                    insertDeleteLog.get(savePort).add("Delete," + request.getMessage());
                 } else {
-                    request.setType("Delete2");
+                    ArrayList<String> temp = new ArrayList<String>();
+                    temp.add("Delete," + request.getMessage());
+                    insertDeleteLog.put(savePort, temp);
                 }
-                String x = sendMessage(request, successorPort * 2);
-                if (x.equals("Failure")) {
-                    if (request.getType().equals("Delete1")) {
+                if (!request.getType().equals("Delete2")) {
+                    if (request.getType().equals("Delete")) {
+                        request.setOriginalPort(Integer.toString(myPort));
+                        request.setType("Delete1");
+                    } else {
                         request.setType("Delete2");
-                        String resp = sendMessage(request, getNextNode(successorPort) * 2);
+                    }
+                    String x = sendMessage(request, successorPort * 2);
+                    if (x.equals("Failure")) {
+                        if (request.getType().equals("Delete1")) {
+                            request.setType("Delete2");
+                            String resp = sendMessage(request, getNextNode(successorPort) * 2);
+                            if (resp.equals("Failure")) {
+                                request.setType("Delete1");
+                                resp = sendMessage(request, successorPort * 2);
+                            }
+                        }
                     }
                 }
-            }
-        } else {
-            if (!request.getOriginalPort().equals(Integer.toString(successorPort))) {
+            } else {
+                if (!request.getOriginalPort().equals(Integer.toString(successorPort))) {
 
-                String resp = sendMessage(request, successorPort * 2);
-                if (resp.equals("Failure")) {
-                    int newPort = getNextNode(successorPort);
-                    if (!request.getOriginalPort().equals(Integer.toString(successorPort))) {
-                        String resp2 = sendMessage(request, newPort * 2);
+                    String resp = sendMessage(request, successorPort * 2);
+                    if (resp.equals("Failure")) {
+                        int newPort = getNextNode(successorPort);
+                        if (!request.getOriginalPort().equals(Integer.toString(successorPort))) {
+                            String resp2 = sendMessage(request, newPort * 2);
+                        }
                     }
                 }
+                sqLiteDatabase.delete(TABLE_NAME, null, null);
             }
-            sqLiteDatabase.delete(TABLE_NAME, null, null);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
 
+        recoveryLock.release();
         return 0;
+    }
+
+    private class RecoveryTask extends AsyncTask<Void, Void, Void> {
+
+        @Override
+        protected Void doInBackground(Void... voids) {
+            SharedPreferences preferences = context.getSharedPreferences("DynamoPref", Context.MODE_PRIVATE);
+            if (!preferences.contains("FirstRun")) {
+                SharedPreferences.Editor editor = preferences.edit();
+                editor.putInt("FirstRun", 0);
+                editor.commit();
+                Log.d("RecoverySeq", "No need");
+                recoveryLock.release();
+                return null;
+            }
+            Log.d("RecoverySeq", "Fetching from Others!");
+            String message = Integer.toString(myPort) + "," + Integer.toString(predecessorPort) + "," + Integer.toString(getPreviousNode(predecessorPort));
+            MessageRequest request = new MessageRequest("Recovery", Integer.toString(myPort), message);
+            //Send to predecessor and successor
+            String predResp = null, succResp = null;
+            predResp = sendMessage(request, predecessorPort * 2);
+            succResp = sendMessage(request, successorPort * 2);
+            if (predResp.equals("Failure")) {
+                predResp = sendMessage(request, predecessorPort * 2);
+            }
+            if (succResp.equals("Failure")) {
+                succResp = sendMessage(request, successorPort * 2);
+            }
+            String predLog = predResp, succLog = succResp;
+
+            predLog = predLog.replaceAll("\\[", "");
+            predLog = predLog.replaceAll("\\]", ", ");
+
+            succLog = succLog.replaceAll("\\[", "");
+            succLog = succLog.replaceAll("\\]", ", ");
+
+            Log.d("PredLog", predLog);
+            Log.d("SuccLog", succLog);
+
+            if (predLog.length() != 0) {
+                String[] preArray = predLog.split(", ");
+                for (String j : preArray) {
+                    String[] x = j.split(",");
+                    if (x[0].equals("Insert")) {
+                        ContentValues values = new ContentValues();
+                        values.put("key", x[1]);
+                        values.put("value", x[2]);
+                        sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+                    } else if (x[0].equals("Delete")) {
+                        String[] whereArgs = {x[1]};
+                        sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+                    }
+                }
+            }
+
+            if (succLog.length() != 0) {
+                String[] sucArray = succLog.split(", ");
+                for (String j : sucArray) {
+                    String[] x = j.split(",");
+                    if (x[0].equals("Insert")) {
+                        ContentValues values = new ContentValues();
+                        values.put("key", x[1]);
+                        values.put("value", x[2]);
+                        sqLiteDatabase.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
+                    } else if (x[0].equals("Delete")) {
+                        String[] whereArgs = {x[1]};
+                        sqLiteDatabase.delete(TABLE_NAME, COLUMN_KEY + "=?", whereArgs);
+                    }
+                }
+            }
+            recoveryLock.release();
+            return null;
+        }
     }
 
     private class ClientTask extends AsyncTask<Object, Void, String> {
